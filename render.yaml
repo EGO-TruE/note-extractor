@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: note-extractor
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 --threads 4 app:app
+    envVars:
+      - key: API_BASE_URL
+        value: https://www.traxnode.com/v1
+      - key: MODEL
+        value: gpt-4o
+      - key: API_KEY
+        sync: false
+      - key: PASSCODE
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true

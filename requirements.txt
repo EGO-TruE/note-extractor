@@ -1,0 +1,7 @@
+requests
+flask
+gunicorn
+python-docx
+pdfplumber
+python-pptx
+python-dotenv
