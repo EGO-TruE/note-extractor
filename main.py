@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import re
+import time
 from pathlib import Path
 
 import requests
@@ -157,7 +158,7 @@ def chunk_text(text: str, max_chars: int = 20000) -> list:
     return chunks
 
 
-def call_ai(text_chunk: str) -> str:
+def call_ai(text_chunk: str, max_retries: int = 3) -> str:
     url = API_BASE_URL.rstrip("/") + "/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -171,9 +172,18 @@ def call_ai(text_chunk: str) -> str:
         ],
         "temperature": 0.2,
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=300)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                print(f"  请求失败（第 {attempt + 1} 次），5 秒后重试：{e}")
+                time.sleep(5)
+    raise last_error
 
 
 def parse_ai_response(response_text: str) -> list:
@@ -198,13 +208,16 @@ def parse_ai_response(response_text: str) -> list:
     return []
 
 
-def extract_knowledge_points(full_text: str) -> list:
+def extract_knowledge_points(full_text: str, progress_callback=None) -> list:
     chunks = chunk_text(full_text)
     all_points = []
-    print(f"  文本已分为 {len(chunks)} 个块，正在逐块分析...")
+    total = len(chunks)
+    print(f"  文本已分为 {total} 个块，正在逐块分析...")
 
     for i, chunk in enumerate(chunks):
-        print(f"  正在分析第 {i + 1}/{len(chunks)} 块...")
+        print(f"  正在分析第 {i + 1}/{total} 块...")
+        if progress_callback:
+            progress_callback(i + 1, total)
         try:
             response = call_ai(chunk)
             points = parse_ai_response(response)
