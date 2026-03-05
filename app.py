@@ -201,7 +201,7 @@ HTML = """<!DOCTYPE html>
     <div class="status">
       <div class="spinner"></div>
       <div class="status-text">AI 正在分析中…</div>
-      <div class="status-hint">通常需要 30 秒至数分钟，请勿关闭此页面</div>
+      <div class="status-hint" id="progressHint">{{ job.progress or '正在准备处理…' }}</div>
     </div>
     <script>
       (function poll() {
@@ -210,7 +210,12 @@ HTML = """<!DOCTYPE html>
             .then(function(r) { return r.json(); })
             .then(function(d) {
               if (d.status !== 'processing') { location.reload(); }
-              else { poll(); }
+              else {
+                if (d.progress) {
+                  document.getElementById('progressHint').textContent = d.progress;
+                }
+                poll();
+              }
             })
             .catch(function() { poll(); });
         }, 2500);
@@ -291,12 +296,16 @@ def upload():
     file.save(tmp_path)
 
     job_id = uuid.uuid4().hex[:8]
-    jobs[job_id] = {"status": "processing", "files": {}, "error": None, "count": 0}
+    jobs[job_id] = {"status": "processing", "progress": "正在读取文件内容…", "files": {}, "error": None, "count": 0}
 
     def process():
         try:
             text = core.read_file(Path(tmp_path))
-            kps = core.extract_knowledge_points(text)
+
+            def on_progress(current, total):
+                jobs[job_id]["progress"] = f"正在分析第 {current}/{total} 块…"
+
+            kps = core.extract_knowledge_points(text, progress_callback=on_progress)
 
             if not kps:
                 jobs[job_id].update({"status": "error", "error": "未提取到知识点，请检查文件内容是否可读"})
@@ -343,7 +352,7 @@ def result(job_id):
 @app.route("/status/<job_id>")
 def status(job_id):
     job = jobs.get(job_id, {"status": "not_found"})
-    return jsonify({"status": job["status"]})
+    return jsonify({"status": job["status"], "progress": job.get("progress", "")})
 
 
 @app.route("/download/<job_id>/<file_type>")
