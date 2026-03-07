@@ -97,40 +97,55 @@ def read_markdown(path: Path) -> str:
     return read_txt(path)
 
 
-def _repair_docx(src_path: Path) -> Path:
-    """重建损坏的 docx，跳过 CRC 校验失败的条目（通常为嵌入图片），返回临时修复文件路径"""
+def _read_docx_xml_fallback(src_path: Path) -> str:
+    """直接解析 word/document.xml 提取文本，完全绕过图片加载，用于含损坏图片的 docx"""
     import zipfile
-    tmp_path = Path(tempfile.mktemp(suffix=".docx"))
-    with zipfile.ZipFile(str(src_path), "r") as zin:
-        with zipfile.ZipFile(str(tmp_path), "w", compression=zipfile.ZIP_DEFLATED) as zout:
-            for info in zin.infolist():
-                try:
-                    data = zin.read(info.filename)
-                    zout.writestr(info, data)
-                except Exception:
-                    pass  # 跳过损坏的条目（图片等），不影响文本提取
-    return tmp_path
+    from lxml import etree
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    with zipfile.ZipFile(str(src_path), "r") as z:
+        try:
+            xml_bytes = z.read("word/document.xml")
+        except Exception as e:
+            raise ValueError(f"无法读取 docx 文档内容：{src_path.name}（{e}）")
+
+    root = etree.fromstring(xml_bytes)
+    paragraphs = []
+    for para_elem in root.iter(f"{{{W}}}p"):
+        texts = []
+        has_mark = False
+        for r_elem in para_elem.iter(f"{{{W}}}r"):
+            rpr = r_elem.find(f"{{{W}}}rPr")
+            if rpr is not None:
+                if (rpr.find(f"{{{W}}}b") is not None or
+                        rpr.find(f"{{{W}}}highlight") is not None):
+                    has_mark = True
+            for t in r_elem.findall(f"{{{W}}}t"):
+                if t.text:
+                    texts.append(t.text)
+        text = "".join(texts).strip()
+        if text:
+            prefix = "【文档格式标注重点】" if has_mark else ""
+            paragraphs.append(prefix + text)
+
+    return "\n\n".join(paragraphs)
 
 
 def read_docx(path: Path) -> str:
     """读取 .docx，同时检测加粗/高亮 run 并插入格式标记"""
     from docx import Document
 
-    repaired_path = None
     try:
         doc = Document(path)
-    except Exception as e:
-        err_str = str(e)
-        if "CRC" in err_str or "Bad" in err_str or "zip" in err_str.lower():
-            repaired_path = _repair_docx(path)
-            doc = Document(repaired_path)
-        else:
-            raise
+    except Exception:
+        # docx 含损坏/缺失图片等问题时，回退到直接解析 XML（绕过图片加载）
+        return _read_docx_xml_fallback(path)
+
     paragraphs = []
     for para in doc.paragraphs:
         if not para.text.strip():
             continue
-        # 检测是否有加粗或高亮的 run
         # 注意：highlight_color 为 'none' 时 python-docx 会抛 ValueError，需捕获
         def _run_has_mark(run):
             if not run.text.strip():
@@ -145,12 +160,6 @@ def read_docx(path: Path) -> str:
         has_format_mark = any(_run_has_mark(run) for run in para.runs)
         prefix = "【文档格式标注重点】" if has_format_mark else ""
         paragraphs.append(prefix + para.text)
-
-    if repaired_path:
-        try:
-            repaired_path.unlink()
-        except OSError:
-            pass
 
     return "\n\n".join(paragraphs)
 
@@ -685,8 +694,12 @@ def create_annotated_doc(full_text: str, knowledge_points: list, output_path: Pa
 
     # 若原始文件是 .docx，直接在原文档上标注以保留格式
     if original_path is not None and original_path.suffix.lower() == ".docx":
-        _annotate_original_docx(original_path, fragments, output_path)
-        return
+        try:
+            _annotate_original_docx(original_path, fragments, output_path)
+            return
+        except Exception:
+            # 原始 docx 含损坏图片等无法直接操作时，回退到纯文本重建模式
+            print("  提示：原始文档含损坏内容，将以纯文本模式生成标注文档。")
 
     # 其他格式：从提取的纯文本重建文档（原有逻辑）
     doc = Document()
