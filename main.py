@@ -106,11 +106,18 @@ def read_docx(path: Path) -> str:
         if not para.text.strip():
             continue
         # 检测是否有加粗或高亮的 run
-        has_format_mark = any(
-            (run.bold or run.font.highlight_color is not None)
-            and run.text.strip()
-            for run in para.runs
-        )
+        # 注意：highlight_color 为 'none' 时 python-docx 会抛 ValueError，需捕获
+        def _run_has_mark(run):
+            if not run.text.strip():
+                return False
+            if run.bold:
+                return True
+            try:
+                return run.font.highlight_color is not None
+            except ValueError:
+                return False
+
+        has_format_mark = any(_run_has_mark(run) for run in para.runs)
         prefix = "【文档格式标注重点】" if has_format_mark else ""
         paragraphs.append(prefix + para.text)
     return "\n\n".join(paragraphs)
