@@ -5,3 +5,12 @@ python-docx
 pdfplumber
 python-pptx
 python-dotenv
+openpyxl
+xlrd
+beautifulsoup4
+lxml
+ebooklib
+striprtf
+pdf2image
+pytesseract
+Pillow
