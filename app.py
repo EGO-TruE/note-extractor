@@ -172,10 +172,10 @@ HTML = """<!DOCTYPE html>
     <label class="upload-area" for="fileInput">
       <div class="upload-icon">📄</div>
       <div class="upload-text">点击选择文件</div>
-      <div class="upload-hint">支持 PDF · Word · PPT · TXT · Markdown</div>
+      <div class="upload-hint">支持 PDF · Word · Excel · PPT · TXT · Markdown · HTML · EPUB · RTF · CSV</div>
     </label>
     <input type="file" id="fileInput" name="file"
-           accept=".pdf,.docx,.pptx,.txt,.md"
+           accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.csv,.html,.htm,.epub,.rtf,.txt,.md"
            onchange="onFileChange(this)">
     <div class="selected-file" id="selectedFile"></div>
     <button type="submit" class="btn" id="submitBtn">开始分析</button>
@@ -318,7 +318,7 @@ def upload():
             annotated_path = out_dir / f"原文_带标注_{stem}.docx"
             summary_path   = out_dir / f"知识点摘要_{stem}.docx"
 
-            core.create_annotated_doc(text, kps, annotated_path)
+            core.create_annotated_doc(text, kps, annotated_path, original_path=Path(tmp_path))
             core.create_summary_doc(kps, original_filename, summary_path)
 
             jobs[job_id].update({
