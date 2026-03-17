@@ -435,30 +435,37 @@ def collect_files(input_path: Path) -> list:
 # Section 3: AI 分析
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """你是一位专业的知识点提取助手。请分析用户提供的文本，找出其中的重要知识点。
+SYSTEM_PROMPT = """你是一个专业的教学内容分析助手，代号"助教Alpha"。你的任务不是创作内容，而是像猎人一样精准地从文本中"抓取"信息。
 
-必须严格按照以下JSON格式输出，不要有任何额外文字：
-{
-  "知识点": [
-    {
-      "序号": 1,
-      "标题": "知识点的简短标题（10字以内）",
-      "原文片段": "该知识点在原文中对应的关键句子（必须精确匹配原文中的文字，用于定位标注）",
-      "说明": "对该知识点的详细解释（50-150字）"
-    }
-  ]
-}
+请严格遵守以下工作流程：
 
-提取规则：
-1. 重点提取：概念定义、核心原理、重要结论、关键步骤、注意事项
-2. 每个知识点必须有明确的学习价值
-3. "原文片段"必须是原文中实际存在的文字，不能改写或添加
-4. 输出纯JSON，不要有任何代码块标记（```）或额外说明
-5. 若原文中含有"重要"、"重点"、"注意"、"关键"、"必须"、"核心"、"★"、"※"、"⚠"、"【重点】"、"【重要】"、"【注意】"等明确标注重要性的词汇或符号，必须将其对应内容提取为知识点，不得遗漏
-6. 若原文中出现"【文档格式标注重点】"前缀，说明该段内容在原文档中已被加粗或高亮标注为重要内容，必须提取
+### 任务背景
+用户会提供两部分信息：
+1.  **【预告区】**：老师在PPT开头列出的重点、难点或考点（可能只有关键词）。
+2.  **【正文区】**：后续的长篇文章、讲义或PPT详细内容。
+
+### 核心逻辑
+1.  **识别模式**：老师在【正文区】可能只划了关键词的开头，或者根本没划线（因为开头已经预告过了）。
+2.  **关联原则**：请根据【预告区】的关键词，在【正文区】中寻找语义最相关、解释最完整的段落。即使正文中没有高亮，只要是对应预告内容的详细解释，都要抓取。
+
+### 执行步骤
+1.  **第一步 - 拆解**：读取【预告区】，提取出每一个独立的知识点关键词。
+2.  **第二步 - 追踪**：带着这些关键词去扫描【正文区】。
+    -   如果遇到关键词只出现了一半（比如只划了前3个字），请自动补全为完整的句子或定义。
+    -   如果内容跨页，请尽量把相关的解释片段串联起来。
+3.  **第三步 - 提取**：只输出原文中对应的句子或段落，不要自己总结，不要丢掉原文的专业术语。
+
+### 输出格式
+请严格按照以下 Markdown 格式输出，不要有任何废话：
+
+####  [在此处填入预告区的第一个关键词]
+> [在此处填入正文中找到的最完整的原句或段落]
+
+####  [在此处填入预告区的第二个关键词]
+> [在此处填入正文中找到的最完整的原句或段落]
 """
 
-USER_PROMPT_TEMPLATE = "请从以下文本中提取重要知识点：\n\n{text}"
+USER_PROMPT_TEMPLATE = """{text}"""
 
 
 def chunk_text(text: str, max_chars: int = 6000) -> list:
@@ -512,41 +519,71 @@ def call_ai(text_chunk: str, max_retries: int = 3) -> str:
 
 
 def parse_ai_response(response_text: str) -> list:
-    # 清理可能的代码块标记
-    cleaned = response_text.strip()
-    cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
-    cleaned = re.sub(r'\s*```$', '', cleaned)
+    """解析 AI 返回的 Markdown 格式：#### 关键词\n> 原文片段"""
+    points = []
+    # 匹配 #### 标题 后跟一行或多行 > 引用内容
+    pattern = re.compile(
+        r'#{3,5}\s+(.+?)\n((?:>.*\n?)+)',
+        re.MULTILINE
+    )
+    for i, m in enumerate(pattern.finditer(response_text)):
+        title = m.group(1).strip()
+        # 去掉每行开头的 "> " 并合并
+        raw_quote = m.group(2)
+        lines = [re.sub(r'^>\s?', '', line) for line in raw_quote.splitlines()]
+        fragment = "\n".join(lines).strip()
+        if title and fragment:
+            points.append({
+                "序号": i + 1,
+                "标题": title,
+                "原文片段": fragment,
+                "说明": "",
+            })
+    if not points:
+        print("  警告：AI 响应解析失败，跳过此块。")
+    return points
 
-    try:
-        data = json.loads(cleaned)
-        return data.get("知识点", [])
-    except json.JSONDecodeError:
-        # 尝试从响应中提取 JSON 块
-        match = re.search(r'\{[\s\S]*\}', cleaned)
-        if match:
-            try:
-                data = json.loads(match.group())
-                return data.get("知识点", [])
-            except json.JSONDecodeError:
-                pass
-    print("  警告：AI 响应解析失败，跳过此块。")
-    return []
+
+def _split_preview_body(full_text: str) -> tuple[str, str]:
+    """
+    尝试从全文中自动分离预告区和正文区。
+    规则：将前 1/5 的段落（或前 10 段，取较小值）视为预告区，其余为正文区。
+    若文档只有一段，则预告区置空，全文作正文区。
+    """
+    paragraphs = [p for p in full_text.split("\n\n") if p.strip()]
+    if len(paragraphs) <= 1:
+        return "", full_text
+
+    split_at = min(max(1, len(paragraphs) // 5), 10)
+    preview = "\n\n".join(paragraphs[:split_at])
+    body    = "\n\n".join(paragraphs[split_at:])
+    return preview, body
 
 
 def extract_knowledge_points(full_text: str, progress_callback=None) -> list:
-    chunks = chunk_text(full_text)
-    all_points = []
-    total = len(chunks)
-    print(f"  文本已分为 {total} 个块，正在逐块分析...")
+    preview, body = _split_preview_body(full_text)
 
-    for i, chunk in enumerate(chunks):
+    # 构建带结构标签的用户输入
+    if preview:
+        structured = f"【预告区】\n{preview}\n\n【正文区】\n{body}"
+    else:
+        structured = f"【正文区】\n{body}"
+
+    # 若正文区过长，分块处理（保持预告区不变）
+    body_chunks = chunk_text(body)
+    total = len(body_chunks)
+    print(f"  正文区已分为 {total} 个块，正在逐块分析...")
+
+    all_points = []
+    for i, chunk in enumerate(body_chunks):
         print(f"  正在分析第 {i + 1}/{total} 块...")
         if progress_callback:
             progress_callback(i + 1, total)
+
+        chunk_input = f"【预告区】\n{preview}\n\n【正文区】\n{chunk}" if preview else f"【正文区】\n{chunk}"
         try:
-            response = call_ai(chunk)
+            response = call_ai(chunk_input)
             points = parse_ai_response(response)
-            # 去除 AI 提取文本中可能残留的格式标记前缀
             for point in points:
                 frag = point.get("原文片段", "")
                 point["原文片段"] = frag.replace("【文档格式标注重点】", "").strip()
@@ -761,16 +798,12 @@ def create_summary_doc(knowledge_points: list, source_filename: str, output_path
         seq   = kp.get("序号", "?")
         title = kp.get("标题", "（无标题）")
         frag  = kp.get("原文片段", "").strip()
-        desc  = kp.get("说明", "").strip()
 
         doc.add_heading(f"{seq}. {title}", level=2)
 
         if frag:
             quote = doc.add_paragraph(style="Quote")
-            quote.add_run(f"原文：{frag}").italic = True
-
-        if desc:
-            doc.add_paragraph(desc)
+            quote.add_run(frag).italic = True
 
         doc.add_paragraph()
 
